@@ -1,0 +1,42 @@
+{
+  "name": "LEGO Dimensions",
+  "id": "CUSA01176",
+  "version": "01.24",
+  "process": "eboot.bin",
+  "mods": [
+    {
+      "name": "60 FPS Engine Unlock V2 (01.24)",
+      "type": "checkbox",
+      "memory": [
+        {
+          "offset": "2E791C0",
+          "on": "00007042",
+          "off": "0000F041"
+        },
+        {
+          "offset": "2E79208",
+          "on": "8988883C",
+          "off": "8988083D"
+        },
+        {
+          "offset": "110E565",
+          "on": "00007042",
+          "off": "0000F041"
+        },
+        {
+          "offset": "110E58C",
+          "on": "00007042",
+          "off": "0000F041"
+        },
+        {
+          "offset": "715063",
+          "on": "9090",
+          "off": "7514"
+        }
+      ]
+    }
+  ],
+  "credits": [
+    "RE_Agent"
+  ]
+}
