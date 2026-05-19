@@ -1,0 +1,195 @@
+name: Release patch ZIP
+
+on:
+  push:
+    paths:
+      - '**/*.json'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed patch files
+        id: changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BEFORE_SHA="${{ github.event.before }}"
+          if [[ -z "$BEFORE_SHA" || "$BEFORE_SHA" == "0000000000000000000000000000000000000000" ]]; then
+            BEFORE_SHA="$(git rev-list --max-parents=0 HEAD)"
+          fi
+
+          git diff --name-only "$BEFORE_SHA" "${{ github.sha }}" -- '*.json' > changed_json_files.txt
+
+          if [[ -s changed_json_files.txt ]]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "changed_files<<EOF"
+              cat changed_json_files.txt
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "before_sha=$BEFORE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Build release notes
+        if: steps.changes.outputs.has_changes == 'true'
+        env:
+          BEFORE_SHA: ${{ steps.changes.outputs.before_sha }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+
+          before_sha = Path('/dev/null')
+          del before_sha
+          import os
+          before_sha = os.environ['BEFORE_SHA']
+          current_sha = os.environ['CURRENT_SHA']
+
+          changed_files = [
+              line.strip()
+              for line in Path('changed_json_files.txt').read_text(encoding='utf-8').splitlines()
+              if line.strip()
+          ]
+
+          def git_show(sha: str, file_path: str):
+              proc = subprocess.run(
+                  ['git', 'show', f'{sha}:{file_path}'],
+                  capture_output=True,
+                  text=True,
+              )
+              if proc.returncode != 0:
+                  return None
+              return proc.stdout
+
+          def parse_patch(raw: str):
+              try:
+                  return json.loads(raw)
+              except Exception:
+                  return {}
+
+          def game_name(data: dict, file_path: str):
+              return data.get('name') or Path(file_path).stem
+
+          def mods_by_name(data: dict):
+              mods = data.get('mods')
+              if not isinstance(mods, list):
+                  return {}
+
+              out = {}
+              for index, mod in enumerate(mods):
+                  if isinstance(mod, dict):
+                      key = mod.get('name') or f'unnamed_mod_{index}'
+                      out[key] = mod
+              return out
+
+          lines = [
+              '## Automated patch changes',
+              '',
+              f'Compared `{before_sha}` -> `{current_sha}`',
+              '',
+          ]
+
+          for file_path in changed_files:
+              old_raw = git_show(before_sha, file_path)
+              new_raw = git_show(current_sha, file_path)
+
+              if old_raw is None and new_raw is None:
+                  continue
+
+              old_data = parse_patch(old_raw) if old_raw is not None else {}
+              new_data = parse_patch(new_raw) if new_raw is not None else {}
+
+              if old_raw is None and new_raw is not None:
+                  title = game_name(new_data, file_path)
+                  lines.append(f'- ✅ New game patch added: **{title}** (`{file_path}`)')
+                  added_mods = sorted(mods_by_name(new_data).keys())
+                  if added_mods:
+                      lines.append(f'  - New cheats: {", ".join(f"`{name}`" for name in added_mods)}')
+                  continue
+
+              if old_raw is not None and new_raw is None:
+                  title = game_name(old_data, file_path)
+                  lines.append(f'- ❌ Patch removed: **{title}** (`{file_path}`)')
+                  continue
+
+              old_title = game_name(old_data, file_path)
+              new_title = game_name(new_data, file_path)
+              old_mods = mods_by_name(old_data)
+              new_mods = mods_by_name(new_data)
+
+              added = sorted(set(new_mods) - set(old_mods))
+              removed = sorted(set(old_mods) - set(new_mods))
+              modified = sorted(
+                  name
+                  for name in (set(old_mods) & set(new_mods))
+                  if json.dumps(old_mods[name], sort_keys=True) != json.dumps(new_mods[name], sort_keys=True)
+              )
+
+              if added or removed or modified or old_title != new_title:
+                  lines.append(f'- ✏️ Updated patch: **{new_title}** (`{file_path}`)')
+                  if old_title != new_title:
+                      lines.append(f'  - Game title changed: `{old_title}` -> `{new_title}`')
+                  if added:
+                      lines.append(f'  - New cheats: {", ".join(f"`{name}`" for name in added)}')
+                  if modified:
+                      lines.append(f'  - Modified cheats: {", ".join(f"`{name}`" for name in modified)}')
+                  if removed:
+                      lines.append(f'  - Removed cheats: {", ".join(f"`{name}`" for name in removed)}')
+              else:
+                  lines.append(f'- ✏️ Updated patch file without cheat-level changes: `{file_path}`')
+
+          if len(lines) == 4:
+              lines.append('- No patch changes detected.')
+
+          Path('RELEASE_NOTES.md').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+          PY
+
+      - name: Build patch ZIP
+        if: steps.changes.outputs.has_changes == 'true'
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+
+          zip_name = Path('ps5-60fps-patches.zip')
+          with zipfile.ZipFile(zip_name, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+              for file_path in sorted(Path('.').rglob('*.json')):
+                  if '.git' in file_path.parts or '.github' in file_path.parts:
+                      continue
+                  zf.write(file_path, arcname=file_path.as_posix())
+          PY
+
+      - name: Set release metadata
+        if: steps.changes.outputs.has_changes == 'true'
+        id: meta
+        shell: bash
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          echo "tag=patches-${{ github.run_number }}-${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "name=Patch bundle #${{ github.run_number }} (${short_sha})" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        if: steps.changes.outputs.has_changes == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.name }}
+          body_path: RELEASE_NOTES.md
+          files: ps5-60fps-patches.zip
